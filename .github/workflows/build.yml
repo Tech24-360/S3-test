@@ -1,4 +1,4 @@
-name: ESP32-S3 Auto BIN Builder
+name: ESP32 Multi Board Builder
 
 on:
   push:
@@ -8,10 +8,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    strategy:
+      max-parallel: 1   
+      matrix:
+        board:
+          - esp32s3
+          - esp32c3
+          - esp32s2
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
+        
       - name: Install Arduino CLI
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -20,53 +28,62 @@ jobs:
       - name: Configure Arduino
         run: |
           arduino-cli config init
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          arduino-cli config add board_manager.additional_urls \
+          https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-      ####################################################
-      #  AUTO-DETECT & INSTALL LIBRARIES (FIXED VERSION)
-      ####################################################
+          # retry fix for network issue
+          arduino-cli core update-index || (sleep 5 && arduino-cli core update-index)
+
+          arduino-cli core install esp32:esp32
+          
+      - name: Install important libraries
+        run: |
+          arduino-cli lib install "MPU6050"
+          arduino-cli lib install "Adafruit Unified Sensor"
+
       - name: Auto-detect & install libraries
         run: |
           echo "🔍 Scanning for libraries…"
 
-          grep -hR '^#include' *.ino \
+          grep -hR '^#include' . \
           | sed 's/#include//; s/[<>""]//g' \
           | sed 's/\.h$//' \
           | sed 's/_/ /g' \
           | sort -u > includes.txt || true
 
-          echo "📄 Normalized libraries detected:"
+          echo " Libraries detected:"
           cat includes.txt || true
           echo
 
           while read lib; do
             [ -z "$lib" ] && continue
-            echo "📦 Installing → $lib"
+            echo " Installing → $lib"
             arduino-cli lib install "$lib" || true
           done < includes.txt
 
-      ####################################################
-      #  COMPILE FIRMWARE (USB-CDC ENABLED)
-      ####################################################
       - name: Compile firmware
         run: |
+          echo " Building for ${{ matrix.board }}"
+
+          # Clean previous build (important)
+          rm -rf build/${{ matrix.board }}
+
+          # Compile with correct board
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32s3 \
+            --fqbn esp32:esp32:${{ matrix.board }} \
             --build-property build.cdc_on_boot=1 \
             --build-property build.tinyusb_cdc_enabled=1 \
-            --output-dir build \
+            --clean \
+            --output-dir build/${{ matrix.board }} \
             .
 
-      ####################################################
-      #  PACKAGE & UPLOAD BIN FILES
-      ####################################################
       - name: Package firmware
-        run: zip -j esp32s3-firmware.zip build/*
+        run: |
+          cd build/${{ matrix.board }}
+          zip -r ../../firmware-${{ matrix.board }}.zip .
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: esp32s3-firmware
-          path: esp32s3-firmware.zip
-          
+          name: firmware-${{ matrix.board }}
+          path: firmware-${{ matrix.board }}.zip
